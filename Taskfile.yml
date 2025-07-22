@@ -1,0 +1,15 @@
+version: "3"
+vars:
+  BIN: '{{ .TASKFILE_DIR }}/tmp/deferrlint'
+
+tasks:
+  build:
+    cmd: go build -o {{ .BIN }}
+  test:
+    cmd: go test -v ./...
+  install:
+    interactive: true
+    deps: [build]
+    env:
+      DESTDIR: '{{.DESTDIR | default "/usr/local/bin"}}'
+    cmd: install {{ .BIN }} $DESTDIR/deferrlint && chmod +x $DESTDIR/deferrlint
