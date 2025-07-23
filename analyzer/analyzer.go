@@ -33,27 +33,25 @@ func run(pass *analysis.Pass) (interface{}, error) {
 	errorType := types.Universe.Lookup("error").Type()
 
 	for _, file := range pass.Files {
-		ast.Inspect(file, func(n ast.Node) bool {
-			fn, ok := n.(*ast.FuncDecl)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
-				return true
+				continue
 			}
 
-			namedErrorObjs := collectNamedErrorReturns(fn, pass, errorType)
-			checkDeferAssignments(fn.Body, pass, namedErrorObjs, errorType)
-			return true
-		})
+			namedErrors := collectNamedErrorReturns(fn, pass, errorType)
+			checkDeferredAssignments(pass, fn.Body, namedErrors, errorType)
+		}
 	}
+
 	return nil, nil
 }
 
-// collectNamedErrorReturns returns the set of named return variables of type `error`.
-// It inspects the function declaration and collects all named return variables
-// that have the error type.
 func collectNamedErrorReturns(fn *ast.FuncDecl, pass *analysis.Pass, errorType types.Type) map[*types.Var]bool {
-	result := make(map[*types.Var]bool)
+	namedErrors := make(map[*types.Var]bool)
+
 	if fn.Type.Results == nil {
-		return result
+		return namedErrors
 	}
 
 	for _, field := range fn.Type.Results.List {
@@ -63,16 +61,15 @@ func collectNamedErrorReturns(fn *ast.FuncDecl, pass *analysis.Pass, errorType t
 			}
 			obj := pass.TypesInfo.ObjectOf(name)
 			if v, ok := obj.(*types.Var); ok && types.Identical(pass.TypesInfo.TypeOf(name), errorType) {
-				result[v] = true
+				namedErrors[v] = true
 			}
 		}
 	}
-	return result
+
+	return namedErrors
 }
 
-// checkDeferAssignments inspects deferred functions for assignments to error-typed vars
-// and reports them if they are not named return variables.
-func checkDeferAssignments(body *ast.BlockStmt, pass *analysis.Pass, namedErrors map[*types.Var]bool, errorType types.Type) {
+func checkDeferredAssignments(pass *analysis.Pass, body *ast.BlockStmt, namedErrors map[*types.Var]bool, errorType types.Type) {
 	for _, stmt := range body.List {
 		deferStmt, ok := stmt.(*ast.DeferStmt)
 		if !ok {
@@ -84,53 +81,50 @@ func checkDeferAssignments(body *ast.BlockStmt, pass *analysis.Pass, namedErrors
 			continue
 		}
 
-		ast.Inspect(fnLit.Body, func(n ast.Node) bool {
-			assign, ok := n.(*ast.AssignStmt)
-			if !ok {
-				return true
-			}
+		checkAssignmentsInDefer(pass, fnLit, namedErrors, errorType)
+	}
+}
 
-			for _, lhs := range assign.Lhs {
-				ident, ok := lhs.(*ast.Ident)
-				if !ok {
-					continue
-				}
+func checkAssignmentsInDefer(pass *analysis.Pass, fnLit *ast.FuncLit, namedErrors map[*types.Var]bool, errorType types.Type) {
+	for _, stmt := range fnLit.Body.List {
+		assign, ok := stmt.(*ast.AssignStmt)
+		if !ok {
+			continue
+		}
 
-				// Skip if the identifier is a blank identifier (unassigned variable)
-				if ident.Name == "_" {
-					continue
-				}
+		for _, lhs := range assign.Lhs {
+			reportIfBadAssignment(pass, lhs, assign, namedErrors, errorType)
+		}
+	}
+}
 
-				// Skip if this is a definition (:=) — new variable, not an assignment
-				if assign.Tok == token.DEFINE {
-					if _, isDef := pass.TypesInfo.Defs[ident]; isDef {
-						continue // skip new variable
-					}
-				}
+func reportIfBadAssignment(pass *analysis.Pass, lhs ast.Expr, assign *ast.AssignStmt, namedErrors map[*types.Var]bool, errorType types.Type) {
+	ident, ok := lhs.(*ast.Ident)
+	if !ok || ident.Name == "_" {
+		return
+	}
 
-				obj := pass.TypesInfo.ObjectOf(ident)
-				typ := pass.TypesInfo.TypeOf(ident)
-				if obj == nil || typ == nil || !types.Identical(typ, errorType) {
-					continue
-				}
+	// Skip := definitions of new variables
+	if assign.Tok == token.DEFINE {
+		if _, isDef := pass.TypesInfo.Defs[ident]; isDef {
+			return
+		}
+	}
 
-				if v, ok := obj.(*types.Var); ok {
-					if namedErrors[v] {
-						continue
-					}
-					pass.Report(analysis.Diagnostic{
-						Pos:     ident.Pos(),
-						Message: fmt.Sprintf("deferred function assigns to error %q, which is not a named return – this assignment will not affect the function's return value", ident.Name),
-						URL:     "github.com/jakobmoellerdev/deferrlint",
-						SuggestedFixes: []analysis.SuggestedFix{
-							{
-								Message: fmt.Sprintf("Consider making %q a named return value", ident.Name),
-							},
-						},
-					})
-				}
-			}
-			return true
+	obj := pass.TypesInfo.ObjectOf(ident)
+	typ := pass.TypesInfo.TypeOf(ident)
+	if obj == nil || typ == nil || !types.Identical(typ, errorType) {
+		return
+	}
+
+	if v, ok := obj.(*types.Var); ok && !namedErrors[v] {
+		pass.Report(analysis.Diagnostic{
+			Pos:     ident.Pos(),
+			Message: fmt.Sprintf("deferred function assigns to error %q, which is not a named return – this assignment will not affect the function's return value", ident.Name),
+			URL:     "github.com/jakobmoellerdev/deferrlint",
+			SuggestedFixes: []analysis.SuggestedFix{
+				{Message: fmt.Sprintf("Consider making %q a named return value", ident.Name)},
+			},
 		})
 	}
 }
