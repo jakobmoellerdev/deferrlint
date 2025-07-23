@@ -17,5 +17,21 @@ func TestAnalyzer(t *testing.T) {
 	}
 
 	testdata := filepath.Join(filepath.Dir(wd), "testdata")
-	analysistest.Run(t, testdata, analyzer.Analyzer, "ok", "fail")
+
+	entries, err := os.ReadDir(filepath.Join(testdata, "src"))
+	if err != nil {
+		t.Fatalf("Failed to read testdata directory: %s", err)
+	}
+
+	folders := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			folders = append(folders, filepath.Base(entry.Name()))
+			t.Logf("Adding %q for analysis test", entry.Name())
+		} else {
+			t.Logf("Skipping non-folder %s", entry.Name())
+		}
+	}
+
+	analysistest.Run(t, testdata, analyzer.Analyzer, folders...)
 }

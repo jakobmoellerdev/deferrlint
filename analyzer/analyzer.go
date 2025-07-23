@@ -9,7 +9,9 @@
 package analyzer
 
 import (
+	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 
 	"golang.org/x/tools/go/analysis"
@@ -21,6 +23,7 @@ var Analyzer = &analysis.Analyzer{
 	Name: "deferrlint",
 	Doc:  "reports when a deferred function assigns to an error-typed variable that is not a named return value",
 	Run:  run,
+	URL:  "github.com/jakobmoellerdev/deferrlint",
 }
 
 // run executes the analysis pass for the deferrlint analyzer.
@@ -93,16 +96,38 @@ func checkDeferAssignments(body *ast.BlockStmt, pass *analysis.Pass, namedErrors
 					continue
 				}
 
+				// Skip if the identifier is a blank identifier (unassigned variable)
+				if ident.Name == "_" {
+					continue
+				}
+
+				// Skip if this is a definition (:=) — new variable, not an assignment
+				if assign.Tok == token.DEFINE {
+					if _, isDef := pass.TypesInfo.Defs[ident]; isDef {
+						continue // skip new variable
+					}
+				}
+
 				obj := pass.TypesInfo.ObjectOf(ident)
 				typ := pass.TypesInfo.TypeOf(ident)
 				if obj == nil || typ == nil || !types.Identical(typ, errorType) {
 					continue
 				}
 
-				if _, ok := obj.(*types.Var); ok {
-					if !namedErrors[obj.(*types.Var)] {
-						pass.Reportf(ident.Pos(), "deferred function assigns to error-typed variable `%s`, but it is not a named return value", ident.Name)
+				if v, ok := obj.(*types.Var); ok {
+					if namedErrors[v] {
+						continue
 					}
+					pass.Report(analysis.Diagnostic{
+						Pos:     ident.Pos(),
+						Message: fmt.Sprintf("deferred function assigns to error %q, which is not a named return – this assignment will not affect the function's return value", ident.Name),
+						URL:     "github.com/jakobmoellerdev/deferrlint",
+						SuggestedFixes: []analysis.SuggestedFix{
+							{
+								Message: fmt.Sprintf("Consider making %q a named return value", ident.Name),
+							},
+						},
+					})
 				}
 			}
 			return true
