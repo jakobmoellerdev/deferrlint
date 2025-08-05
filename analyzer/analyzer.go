@@ -13,6 +13,7 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -31,8 +32,8 @@ var Analyzer = &analysis.Analyzer{
 // which are not named return values.
 func run(pass *analysis.Pass) (interface{}, error) {
 	errorType := types.Universe.Lookup("error").Type()
-
 	for _, file := range pass.Files {
+		comments := ast.NewCommentMap(pass.Fset, file, file.Comments)
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
@@ -40,7 +41,7 @@ func run(pass *analysis.Pass) (interface{}, error) {
 			}
 
 			namedErrors := collectNamedErrorReturns(fn, pass, errorType)
-			checkDeferredAssignments(pass, fn.Body, namedErrors, errorType)
+			checkDeferredAssignments(pass, fn.Body, namedErrors, errorType, comments)
 		}
 	}
 
@@ -69,7 +70,7 @@ func collectNamedErrorReturns(fn *ast.FuncDecl, pass *analysis.Pass, errorType t
 	return namedErrors
 }
 
-func checkDeferredAssignments(pass *analysis.Pass, body *ast.BlockStmt, namedErrors map[*types.Var]bool, errorType types.Type) {
+func checkDeferredAssignments(pass *analysis.Pass, body *ast.BlockStmt, namedErrors map[*types.Var]bool, errorType types.Type, comments ast.CommentMap) {
 	for _, stmt := range body.List {
 		deferStmt, ok := stmt.(*ast.DeferStmt)
 		if !ok {
@@ -81,11 +82,11 @@ func checkDeferredAssignments(pass *analysis.Pass, body *ast.BlockStmt, namedErr
 			continue
 		}
 
-		checkAssignmentsInDefer(pass, fnLit, namedErrors, errorType)
+		checkAssignmentsInDefer(pass, fnLit, namedErrors, errorType, comments)
 	}
 }
 
-func checkAssignmentsInDefer(pass *analysis.Pass, fnLit *ast.FuncLit, namedErrors map[*types.Var]bool, errorType types.Type) {
+func checkAssignmentsInDefer(pass *analysis.Pass, fnLit *ast.FuncLit, namedErrors map[*types.Var]bool, errorType types.Type, comments ast.CommentMap) {
 	for _, stmt := range fnLit.Body.List {
 		assign, ok := stmt.(*ast.AssignStmt)
 		if !ok {
@@ -93,6 +94,10 @@ func checkAssignmentsInDefer(pass *analysis.Pass, fnLit *ast.FuncLit, namedError
 		}
 
 		for _, lhs := range assign.Lhs {
+			if hasNoLintDirective(comments, assign) {
+				// Skip this assignment if it has a "//nolint:deferrlint" directive
+				continue
+			}
 			reportIfBadAssignment(pass, lhs, assign, namedErrors, errorType)
 		}
 	}
@@ -127,4 +132,27 @@ func reportIfBadAssignment(pass *analysis.Pass, lhs ast.Expr, assign *ast.Assign
 			},
 		})
 	}
+}
+
+// hasNoLintDirective reports true if the statement has a "//nolint:deferrlint" comment attached to it.
+func hasNoLintDirective(cMap ast.CommentMap, stmt ast.Stmt) bool {
+	// cMap.Filter(stmt) gives you only the comment groups that apply directly.
+	for node, groups := range cMap.Filter(stmt) {
+		// sometimes you get the enclosing node, so double-check its Pos overlaps
+		if node.Pos() > stmt.End() || node.End() < stmt.Pos() {
+			continue
+		}
+		for _, cg := range groups {
+			for _, c := range cg.List {
+				text := strings.TrimSpace(c.Text)
+				if strings.HasPrefix(text, "//nolint") || strings.HasPrefix(text, "// nolint") {
+					// either blanket nolint or specific to our analyzer
+					if strings.Contains(text, "deferrlint") || !strings.Contains(text, ":") {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
